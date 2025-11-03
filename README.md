@@ -27,6 +27,7 @@ docker run --rm -v $(pwd):/workspace sanghaklee/ncc -e .env
 # 디렉토리의 모든 .env* 파일 테스트
 docker run --rm -v $(pwd):/workspace sanghaklee/ncc -e ./env/
 ```
+- 호스트 볼륨은 환경에 맞게 수정 ~~$(pwd)~~
 
 ### 로컬 실행
 ```bash
@@ -86,7 +87,7 @@ chmod +x check.sh
 
 ```bash
 docker run --rm --network host \
-  -v $(pwd):/workspace \
+  -v /opt/app/:/workspace \
   sanghaklee/ncc -e .env
 ```
 
