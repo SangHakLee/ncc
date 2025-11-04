@@ -4,6 +4,10 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   semantic-release:
     runs-on: ubuntu-latest
@@ -115,17 +119,25 @@ jobs:
         run: |
           make release-${{ steps.commits.outputs.version_type }}
 
+      - name: Get version from file
+        if: steps.commits.outputs.should_release == 'true'
+        id: version
+        run: |
+          VERSION=$(cat VERSION)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "📦 Version: ${VERSION}"
+
       - name: Push changes
         if: steps.commits.outputs.should_release == 'true'
         run: |
           git push origin main
-          git push origin "v$(cat VERSION)"
+          git push origin "v${{ steps.version.outputs.version }}"
 
       - name: Generate Release Notes
         if: steps.commits.outputs.should_release == 'true'
         id: release_notes
         run: |
-          VERSION=$(cat VERSION)
+          VERSION="${{ steps.version.outputs.version }}"
           LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           
           {
@@ -175,8 +187,8 @@ jobs:
         if: steps.commits.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v$(cat VERSION)
-          name: v$(cat VERSION)
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
           body: ${{ steps.release_notes.outputs.notes }}
           draft: false
           prerelease: false

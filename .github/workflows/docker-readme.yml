@@ -1,0 +1,24 @@
+name: Sync README to Docker Hub
+
+on:
+  push:
+    tags:
+      - 'v*'  # v로 시작하는 태그가 푸시될 때 실행
+  release:
+    types: [published]  # GitHub Release가 발행될 때도 실행
+  workflow_dispatch:  # 수동 실행 옵션
+
+jobs:
+  sync-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Update Docker Hub Description
+        uses: peter-evans/dockerhub-description@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: sanghaklee/ncc
+          readme-filepath: ./README.md
+          short-description: "Network Connection Checker - TCP/HTTP connection testing tool"
