@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run tests
+        run: |
+          chmod +x check.sh
+          make test
+
+      - name: Test Docker build
+        run: make docker-build

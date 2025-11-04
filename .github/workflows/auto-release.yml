@@ -1,0 +1,184 @@
+name: Auto Semantic Release
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  semantic-release:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Analyze commits (Semantic Release Rules)
+        id: commits
+        run: |
+          # 마지막 태그 이후의 커밋 가져오기
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -z "$LAST_TAG" ]; then
+            echo "📊 No previous tag found, analyzing all commits"
+            COMMITS=$(git log --pretty=format:"%B" --reverse)
+          else
+            echo "📊 Analyzing commits since $LAST_TAG"
+            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%B" --reverse)
+          fi
+          
+          # Semantic Release 규칙에 따른 버전 결정
+          VERSION_TYPE="none"
+          SHOULD_RELEASE="false"
+          BREAKING_CHANGES="false"
+          NEW_FEATURES="false"
+          BUG_FIXES="false"
+          
+          # 각 커밋 분석
+          while IFS= read -r commit; do
+            # Skip empty lines
+            [[ -z "$commit" ]] && continue
+            
+            # BREAKING CHANGE 체크 (본문에 있는 경우)
+            if echo "$commit" | grep -q "BREAKING CHANGE:" || echo "$commit" | grep -q "BREAKING-CHANGE:"; then
+              BREAKING_CHANGES="true"
+              SHOULD_RELEASE="true"
+              echo "  💥 Breaking change detected"
+            fi
+            
+            # 제목 라인만 추출
+            SUBJECT=$(echo "$commit" | head -n1)
+            
+            # feat! 또는 fix! 같은 breaking change 표시
+            if echo "$SUBJECT" | grep -qE "^[a-z]+(\(.*\))?!:"; then
+              BREAKING_CHANGES="true"
+              SHOULD_RELEASE="true"
+              echo "  💥 Breaking change detected (! notation)"
+            fi
+            
+            # feat: 새 기능
+            if echo "$SUBJECT" | grep -qE "^feat(\(.*\))?:"; then
+              NEW_FEATURES="true"
+              SHOULD_RELEASE="true"
+              echo "  ✨ New feature detected"
+            fi
+            
+            # fix: 버그 수정
+            if echo "$SUBJECT" | grep -qE "^fix(\(.*\))?:"; then
+              BUG_FIXES="true"
+              SHOULD_RELEASE="true"
+              echo "  🐛 Bug fix detected"
+            fi
+            
+            # perf: 성능 개선 (patch)
+            if echo "$SUBJECT" | grep -qE "^perf(\(.*\))?:"; then
+              BUG_FIXES="true"
+              SHOULD_RELEASE="true"
+              echo "  ⚡ Performance improvement detected"
+            fi
+          done <<< "$COMMITS"
+          
+          # 최종 버전 타입 결정 (우선순위: major > minor > patch)
+          if [ "$BREAKING_CHANGES" = "true" ]; then
+            VERSION_TYPE="major"
+            echo "🚀 Version type: MAJOR (breaking changes)"
+          elif [ "$NEW_FEATURES" = "true" ]; then
+            VERSION_TYPE="minor"
+            echo "🎉 Version type: MINOR (new features)"
+          elif [ "$BUG_FIXES" = "true" ]; then
+            VERSION_TYPE="patch"
+            echo "🔧 Version type: PATCH (bug fixes)"
+          else
+            echo "⏭️  No release needed (only chore/docs/style/refactor/test commits)"
+          fi
+          
+          echo "version_type=${VERSION_TYPE}" >> $GITHUB_OUTPUT
+          echo "should_release=${SHOULD_RELEASE}" >> $GITHUB_OUTPUT
+
+      - name: Configure Git
+        if: steps.commits.outputs.should_release == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Login to Docker Hub
+        if: steps.commits.outputs.should_release == 'true'
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Execute release
+        if: steps.commits.outputs.should_release == 'true'
+        run: |
+          make release-${{ steps.commits.outputs.version_type }}
+
+      - name: Push changes
+        if: steps.commits.outputs.should_release == 'true'
+        run: |
+          git push origin main
+          git push origin "v$(cat VERSION)"
+
+      - name: Generate Release Notes
+        if: steps.commits.outputs.should_release == 'true'
+        id: release_notes
+        run: |
+          VERSION=$(cat VERSION)
+          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          {
+            echo "notes<<EOF"
+            echo "## What's Changed in v${VERSION}"
+            echo ""
+            
+            # Breaking Changes
+            if git log ${LAST_TAG}..HEAD --grep="BREAKING" --pretty=format:"%s" | grep -q .; then
+              echo "### 💥 Breaking Changes"
+              git log ${LAST_TAG}..HEAD --grep="BREAKING" --pretty=format:"- %s" 
+              echo ""
+            fi
+            
+            # New Features
+            if git log ${LAST_TAG}..HEAD --grep="^feat" --pretty=format:"%s" | grep -q .; then
+              echo "### ✨ Features"
+              git log ${LAST_TAG}..HEAD --grep="^feat" --pretty=format:"- %s"
+              echo ""
+            fi
+            
+            # Bug Fixes
+            if git log ${LAST_TAG}..HEAD --grep="^fix" --pretty=format:"%s" | grep -q .; then
+              echo "### 🐛 Bug Fixes"
+              git log ${LAST_TAG}..HEAD --grep="^fix" --pretty=format:"- %s"
+              echo ""
+            fi
+            
+            # Performance
+            if git log ${LAST_TAG}..HEAD --grep="^perf" --pretty=format:"%s" | grep -q .; then
+              echo "### ⚡ Performance"
+              git log ${LAST_TAG}..HEAD --grep="^perf" --pretty=format:"- %s"
+              echo ""
+            fi
+            
+            echo "### 📦 Docker"
+            echo '```bash'
+            echo "docker pull sanghaklee/ncc:${VERSION}"
+            echo "docker pull sanghaklee/ncc:latest"
+            echo '```'
+            echo ""
+            echo "**Full Changelog**: https://github.com/SangHakLee/ncc/compare/${LAST_TAG}...v${VERSION}"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: steps.commits.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v$(cat VERSION)
+          name: v$(cat VERSION)
+          body: ${{ steps.release_notes.outputs.notes }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
