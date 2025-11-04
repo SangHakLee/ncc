@@ -14,6 +14,7 @@ YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m'
 CYAN=$'\033[0;36m'
 BOLD=$'\033[0;1m'
+GRAY=$'\033[0;37m'  # 추가
 NC=$'\033[0m' # No Color
 
 # 버전 정보 읽기
@@ -56,8 +57,13 @@ ${GREEN}선택 옵션:${NC}
                         • ping  : Ping 테스트만
                         • curl  : HTTP/HTTPS 테스트만
                         • dns   : DNS 조회만
+                        • tcp   : TCP 포트 연결 테스트만
     -v, --verbose       상세 출력 모드
     -h, --help          이 도움말 출력
+
+${GREEN}지원 형식:${NC}
+    • HTTP/HTTPS URL : http://example.com, https://api.example.com
+    • TCP 연결       : 172.16.151.7:3306, 192.168.1.100:8080
 
 ${GREEN}예제:${NC}
     # 기본 테스트
@@ -69,11 +75,8 @@ ${GREEN}예제:${NC}
     # 여러 환경 파일 테스트
     -e .env.dev -e .env.prod
 
-    # 디렉토리와 파일 혼합
-    -e ./env/ -e .env.local
-
-    # Ping 테스트만 수행
-    -e .env.staging -t ping
+    # TCP 테스트만 수행
+    -e .env -t tcp
 
     # 상세 모드로 실행
     -e .env --verbose
@@ -124,9 +127,9 @@ parse_args() {
                     echo -e "${RED}❌ 오류: -t 옵션에 타입이 필요합니다${NC}"
                     exit 1
                 fi
-                if [[ ! "$2" =~ ^(all|ping|curl|dns)$ ]]; then
+                if [[ ! "$2" =~ ^(all|ping|curl|dns|tcp)$ ]]; then  # tcp 추가
                     echo -e "${RED}❌ 오류: 유효하지 않은 테스트 타입: $2${NC}"
-                    echo -e "${YELLOW}유효한 타입: all, ping, curl, dns${NC}"
+                    echo -e "${YELLOW}유효한 타입: all, ping, curl, dns, tcp${NC}"
                     exit 1
                 fi
                 TEST_TYPE="$2"
@@ -155,7 +158,7 @@ parse_args() {
     fi
 }
 
-# .env 파일 로드
+# .env 파일 로드 (수정됨)
 load_env_file() {
     local env_file=$1
     LOADED_VARS=()
@@ -189,11 +192,15 @@ load_env_file() {
             elif [ "$VERBOSE" == "true" ]; then
                 echo -e "  ${YELLOW}⏩ 스킵:${NC} $key (로컬 호스트: $value)"
             fi
+        # IP:PORT 형식 찾기 (추가)
+        elif [[ "$value" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5}$ ]]; then
+            LOADED_VARS+=("$key=$value")
+            echo -e "  ${CYAN}📌 발견:${NC} $key = $value ${GRAY}(TCP)${NC}"
         fi
     done < <(grep -v '^[[:space:]]*#' "$env_file" | grep '=')
     
     if [ ${#LOADED_VARS[@]} -eq 0 ]; then
-        echo -e "  ${YELLOW}⚠️  테스트할 URL을 찾을 수 없습니다 (http:// 또는 https://로 시작하는 값 필요)${NC}"
+        echo -e "  ${YELLOW}⚠️  테스트할 URL이나 TCP 연결을 찾을 수 없습니다${NC}"
     fi
     echo ""
 }
@@ -203,6 +210,73 @@ parse_host() {
     local input=$1
     # 프로토콜 제거, 경로 제거, 포트 제거
     echo "$input" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|:.*$||'
+}
+
+# IP:PORT 형식 파싱 (추가)
+parse_tcp_endpoint() {
+    local input=$1
+    # IP:PORT 패턴 매칭 (IPv4:port)
+    if [[ "$input" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]{1,5})$ ]]; then
+        echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
+# TCP 포트 연결 테스트 (추가)
+test_tcp() {
+    local input=$1
+    local name=$2
+    
+    # IP:PORT 파싱
+    local endpoint=$(parse_tcp_endpoint "$input")
+    if [ $? -ne 0 ]; then
+        # IP:PORT 형식이 아니면 스킵
+        return 1
+    fi
+    
+    local host=$(echo "$endpoint" | cut -d' ' -f1)
+    local port=$(echo "$endpoint" | cut -d' ' -f2)
+    
+    echo -e "  ${BOLD}[TCP]${NC} nc $host:$port"
+    
+    local success=false
+    local method=""
+    
+    # Method 1: nc (netcat) 우선 시도
+    if command -v nc &> /dev/null; then
+        if timeout 3 nc -zw2 "$host" "$port" &> /dev/null; then
+            success=true
+            method="nc"
+            if [ "$VERBOSE" == "true" ]; then
+                echo -e "      Method: netcat (nc)"
+                nc -zv "$host" "$port" 2>&1 | sed 's/^/      /'
+            fi
+        fi
+    fi
+    
+    # Method 2: /dev/tcp fallback
+    if [ "$success" == "false" ]; then
+        if timeout 3 bash -c "cat < /dev/null > /dev/tcp/$host/$port" 2>/dev/null; then
+            success=true
+            method="/dev/tcp"
+            if [ "$VERBOSE" == "true" ]; then
+                echo -e "      Method: /dev/tcp (bash built-in)"
+            fi
+        fi
+    fi
+    
+    # 결과 출력
+    if [ "$success" == "true" ]; then
+        echo -e "    ${GREEN}✅ 포트 $port 열림${NC} ($method)"
+    else
+        echo -e "    ${RED}❌ 포트 $port 연결 실패${NC}"
+        if [ "$VERBOSE" == "true" ]; then
+            echo -e "      호스트에 연결할 수 없거나 포트가 닫혀 있습니다"
+        fi
+    fi
+    
+    return $([ "$success" == "true" ] && echo 0 || echo 1)
 }
 
 # Ping 테스트
@@ -321,7 +395,7 @@ test_curl() {
     fi
 }
 
-# 테스트 실행
+# 테스트 실행 (수정됨)
 run_tests() {
     local value=$1
     local key=$2
@@ -336,25 +410,44 @@ run_tests() {
         fi
     fi
 
-    case $TEST_TYPE in
-        ping)
-            test_ping "$value" "$key"
-            ;;
-        dns)
-            test_dns "$value" "$key"
-            ;;
-        curl)
-            test_curl "$value" "$key"
-            ;;
-        all|*)
-            test_dns "$value" "$key"
-            test_ping "$value" "$key"
-            # http/https URL이면 HTTP 테스트
-            if [[ "$value" =~ ^https?:// ]]; then
+    # IP:PORT 형식인지 확인
+    if [[ "$value" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5}$ ]]; then
+        # TCP 연결 테스트
+        case $TEST_TYPE in
+            tcp|all)
+                test_tcp "$value" "$key"
+                ;;
+            *)
+                if [ "$VERBOSE" == "true" ]; then
+                    echo -e "    ${GRAY}⏩ TCP 테스트 스킵 (현재 타입: $TEST_TYPE)${NC}"
+                fi
+                ;;
+        esac
+    # HTTP/HTTPS URL인 경우
+    elif [[ "$value" =~ ^https?:// ]]; then
+        case $TEST_TYPE in
+            ping)
+                test_ping "$value" "$key"
+                ;;
+            dns)
+                test_dns "$value" "$key"
+                ;;
+            curl)
                 test_curl "$value" "$key"
-            fi
-            ;;
-    esac
+                ;;
+            tcp)
+                # TCP 타입일 때는 HTTP URL 스킵
+                if [ "$VERBOSE" == "true" ]; then
+                    echo -e "    ${GRAY}⏩ HTTP/HTTPS 테스트 스킵 (TCP 모드)${NC}"
+                fi
+                ;;
+            all|*)
+                test_dns "$value" "$key"
+                test_ping "$value" "$key"
+                test_curl "$value" "$key"
+                ;;
+        esac
+    fi
 }
 
 # 메인 함수

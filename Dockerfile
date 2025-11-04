@@ -10,6 +10,7 @@ RUN apk add --no-cache \
     iputils \
     ca-certificates \
     coreutils \
+    netcat-openbsd \
     && rm -rf /var/cache/apk/*
 
 # 작업 디렉토리 설정
